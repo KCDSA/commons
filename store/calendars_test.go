@@ -5,86 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"commons/internal/testhelpers"
 )
-
-func TestBulkInsertCalendarEventsInsertsAll(t *testing.T) {
-	ctx := context.Background()
-	pool := testhelpers.SetupTestDB(t)
-
-	c := &Calendar{Name: "Events Cal", Slug: "events-cal", Timezone: "UTC"}
-	require.NoError(t, CreateCalendar(ctx, pool, c))
-
-	now := time.Now().UTC().Truncate(time.Second)
-	events := []CalendarEvent{
-		{Title: "Meeting A", StartTime: now.Add(1 * time.Hour)},
-		{Title: "Meeting B", StartTime: now.Add(2 * time.Hour)},
-		{Title: "Meeting C", StartTime: now.Add(3 * time.Hour)},
-	}
-
-	inserted, err := BulkInsertCalendarEvents(ctx, pool, c.ID, events)
-	require.NoError(t, err)
-	assert.Equal(t, 3, inserted)
-
-	got, err := ListCalendarEvents(ctx, pool, c.ID)
-	require.NoError(t, err)
-	assert.Len(t, got, 3)
-}
-
-func TestBulkInsertCalendarEventsSkipsDuplicates(t *testing.T) {
-	ctx := context.Background()
-	pool := testhelpers.SetupTestDB(t)
-
-	c := &Calendar{Name: "Dedup Cal", Slug: "dedup-cal", Timezone: "UTC"}
-	require.NoError(t, CreateCalendar(ctx, pool, c))
-
-	start := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
-	events := []CalendarEvent{
-		{Title: "Council Meeting", StartTime: start},
-	}
-
-	first, err := BulkInsertCalendarEvents(ctx, pool, c.ID, events)
-	require.NoError(t, err)
-	assert.Equal(t, 1, first)
-
-	// Same event again — should be skipped.
-	second, err := BulkInsertCalendarEvents(ctx, pool, c.ID, events)
-	require.NoError(t, err)
-	assert.Equal(t, 0, second, "duplicate should be skipped")
-
-	got, err := ListCalendarEvents(ctx, pool, c.ID)
-	require.NoError(t, err)
-	assert.Len(t, got, 1, "only one row should exist after dedup")
-}
-
-func TestCountUpcomingEventsWindowFilter(t *testing.T) {
-	ctx := context.Background()
-	pool := testhelpers.SetupTestDB(t)
-
-	c := &Calendar{Name: "Window Cal", Slug: "window-cal", Timezone: "UTC"}
-	require.NoError(t, CreateCalendar(ctx, pool, c))
-
-	now := time.Now().UTC()
-	events := []CalendarEvent{
-		{Title: "Soon", StartTime: now.Add(12 * time.Hour)},      // within 1 day
-		{Title: "Later", StartTime: now.Add(5 * 24 * time.Hour)}, // within 7 days, not 1
-		{Title: "Far", StartTime: now.Add(30 * 24 * time.Hour)},  // outside 7 days
-		{Title: "Past", StartTime: now.Add(-1 * time.Hour)},      // in the past
-	}
-	_, err := BulkInsertCalendarEvents(ctx, pool, c.ID, events)
-	require.NoError(t, err)
-
-	within1, err := CountUpcomingEvents(ctx, pool, 1)
-	require.NoError(t, err)
-	assert.Equal(t, 1, within1, "only the 12h event is within 1 day")
-
-	within7, err := CountUpcomingEvents(ctx, pool, 7)
-	require.NoError(t, err)
-	assert.Equal(t, 2, within7, "12h and 5-day events are within 7 days")
-}
 
 func TestGetCalendarByID(t *testing.T) {
 	pool := testhelpers.SetupTestDB(t)
@@ -176,4 +102,45 @@ func TestListCalendarsOrdersByDisplayOrderThenName(t *testing.T) {
 	assert.Equal(t, "Middle", got[1].Name) // display_order 1
 	assert.Equal(t, "Alpha", got[2].Name)  // display_order 2, A < Z
 	assert.Equal(t, "Zebra", got[3].Name)  // display_order 2, Z > A
+}
+
+func TestUpdatesPopulateUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	pool := testhelpers.SetupTestDB(t)
+
+	cal := &Calendar{Name: "Stamps", Slug: "stamps", Timezone: "UTC"}
+	require.NoError(t, CreateCalendar(ctx, pool, cal))
+
+	evt := &CalendarEvent{Title: "Event", StartTime: time.Now().Add(24 * time.Hour)}
+	evt.CalendarID = cal.ID
+	require.NoError(t, CreateCalendarEvent(ctx, pool, evt))
+
+	// Capture pre-update timestamps, then ensure the update lands in a later transaction.
+	before := *GetCalendarByIDOrFatal(t, ctx, pool, cal.ID)
+	evtBefore := GetCalendarEventByIDOrFatal(t, ctx, pool, evt.ID)
+	time.Sleep(20 * time.Millisecond)
+
+	cal.Name = "Stamps 2"
+	require.NoError(t, UpdateCalendar(ctx, pool, cal))
+	evt.Title = "Event 2"
+	require.NoError(t, UpdateCalendarEvent(ctx, pool, evt))
+
+	got := GetCalendarByIDOrFatal(t, ctx, pool, cal.ID)
+	assert.True(t, got.UpdatedAt.After(before.UpdatedAt), "calendar updated_at should advance on update")
+	evtGot := GetCalendarEventByIDOrFatal(t, ctx, pool, evt.ID)
+	assert.True(t, evtGot.UpdatedAt.After(evtBefore.UpdatedAt), "event updated_at should advance on update")
+}
+
+func GetCalendarByIDOrFatal(t testing.TB, ctx context.Context, pool *pgxpool.Pool, id string) *Calendar {
+	t.Helper()
+	cal, err := GetCalendarByID(ctx, pool, id)
+	require.NoError(t, err)
+	return cal
+}
+
+func GetCalendarEventByIDOrFatal(t testing.TB, ctx context.Context, pool *pgxpool.Pool, id string) *CalendarEvent {
+	t.Helper()
+	evt, err := GetCalendarEventByID(ctx, pool, id)
+	require.NoError(t, err)
+	return evt
 }

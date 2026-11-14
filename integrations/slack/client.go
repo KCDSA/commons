@@ -37,6 +37,10 @@ const (
 	ActionCalendarShowList    = "calendar_show_list"    // opens event list modal; value = calendarID
 	ActionCalendarEventEdit   = "calendar_event_edit"   // push edit modal; value = eventID
 	ActionCalendarEventDelete = "calendar_event_delete" // delete event; value = eventID
+
+	// My Calendar — the user's personal composite view.
+	ActionCreateMyCalendar = "create_my_calendar" // opens My Calendar modal when none exists
+	ActionEditMyCalendar   = "edit_my_calendar"   // opens My Calendar modal pre-checked
 )
 
 // Modal callback IDs.
@@ -57,6 +61,9 @@ const (
 	ModalIDCalendarCreateEvent = "calendar_create_event"
 	ModalIDCalendarEventList   = "calendar_event_list"
 	ModalIDCalendarEditEvent   = "calendar_edit_event"
+
+	// My Calendar modal callback ID.
+	ModalIDMyCalendar = "my_calendar"
 )
 
 // ActionScheduleMeeting opens the schedule meeting modal from App Home.
@@ -252,12 +259,18 @@ func getClient(ctx context.Context) *slacklib.Client {
 		return nil
 	}
 	mu.Lock()
-	defer mu.Unlock()
-	if token != cachedToken {
+	changed := token != cachedToken
+	if changed {
 		cachedToken = token
 		cachedClient = slacklib.New(token)
 	}
-	return cachedClient
+	client := cachedClient
+	mu.Unlock()
+	if changed {
+		// First use of this token (startup, or the token was just saved): register the workspace IDs.
+		go registerWorkspaceIdentifiers(context.Background(), pkgPool, pkgEncKey, client)
+	}
+	return client
 }
 
 // SlackChannel is a minimal channel descriptor returned by ListChannels.
